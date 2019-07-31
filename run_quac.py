@@ -5,23 +5,29 @@ import glob
 import logging
 import os
 import random
-from torch import nn
+import re
+
 import numpy as np
 import torch
 from pytorch_transformers import AdamW, WarmupLinearSchedule
-from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
+from pytorch_transformers import (BertConfig,
                                   BertForQuestionAnswering, BertTokenizer,
                                   XLMConfig, XLMForQuestionAnswering,
                                   XLMTokenizer, XLNetConfig,
                                   XLNetForQuestionAnswering,
                                   XLNetTokenizer)
 from tensorboardX import SummaryWriter
+from torch import nn
+from torch.nn import CrossEntropyLoss
 from torch.utils.data import (DataLoader, RandomSampler)
+from torch.utils.data import SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
-from torch.nn import CrossEntropyLoss
 
+from utils import RawResult
+from utils import RawResultExtended
 from utils import load_and_cache_examples
+from utils import write_predictions
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +156,7 @@ def main():
                         help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_all_checkpoints", action='store_true',
                         help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number")
+    parser.add_argument('--checkpoint-no', type=int, default=None)
     parser.add_argument("--no_cuda", action='store_true',
                         help="Whether not to use CUDA when available")
     parser.add_argument('--overwrite_output_dir', action='store_true',
@@ -223,54 +230,50 @@ def main():
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
-    # Save the trained model and the tokenizer
-    if args.local_rank == -1 or torch.distributed.get_rank() == 0:
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
+        # Save the trained model and the tokenizer
+        if args.local_rank == -1 or torch.distributed.get_rank() == 0:
+            # Create output directory if needed
+            if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+                os.makedirs(args.output_dir)
 
-        logger.info("Saving model checkpoint to %s", args.output_dir)
-        # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-        # They can then be reloaded using `from_pretrained()`
-        model_to_save = model.module if hasattr(model,
-                                                'module') else model  # Take care of distributed/parallel training
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
+            logger.info("Saving model checkpoint to %s", args.output_dir)
+            # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+            # They can then be reloaded using `from_pretrained()`
+            model_to_save = model.module if hasattr(model,
+                                                    'module') else model  # Take care of distributed/parallel training
+            model_to_save.save_pretrained(args.output_dir)
+            tokenizer.save_pretrained(args.output_dir)
 
-        # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
+            # Good practice: save your training arguments together with the trained model
+            torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
 
-        # Load a trained model and vocabulary that you have fine-tuned
-        model = model_class.from_pretrained(args.output_dir)
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir)
-        model.to(args.device)
-
-    # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
-    results = {}
-    if args.do_eval and args.local_rank in [-1, 0]:
-        checkpoints = [args.output_dir]
-        if args.eval_all_checkpoints:
-            checkpoints = list(
-                os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
-            logging.getLogger("pytorch_transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
-
-        logger.info("Evaluate the following checkpoints: %s", checkpoints)
-
-        for checkpoint in checkpoints:
-            # Reload the model
-            global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
-            model = model_class.from_pretrained(checkpoint)
+            # Load a trained model and vocabulary that you have fine-tuned
+            model = model_class.from_pretrained(args.output_dir)
+            tokenizer = tokenizer_class.from_pretrained(args.output_dir)
             model.to(args.device)
 
+    # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
+    if args.do_eval and args.local_rank in [-1, 0]:
+        checkpoints = glob.glob(os.path.join(args.output_dir, "checkpoint-*"), recursive=True)
+        checkpoints = sorted(
+            zip(checkpoints, map(lambda x: int(re.search(r"checkpoint-([\d]+)", x).groups()[0]), checkpoints)),
+            key=lambda x: x[1], reverse=True)
+
+        if not args.eval_all_checkpoints:
+            if args.checkpoint_no:
+                checkpoints = filter(lambda x: re.search(r"checkpoint-{}".format(args.checkpoint_no), x[0]), checkpoints)
+            else:
+                checkpoints = checkpoints[:1]
+
+        for checkpoint, global_step in checkpoints:
+
+            # Reload the model
+            model = BertForQuAC.from_pretrained(checkpoint)
+            model.to(args.device)
+
+            logger.info("Evaluate the following checkpoints: %s", checkpoint)
             # Evaluate
-            result = evaluate(args, model, tokenizer, prefix=global_step)
-
-            result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
-            results.update(result)
-
-    logger.info("Results: {}".format(results))
-
-    return results
+            evaluate(args, model, tokenizer, prefix=str(global_step))
 
 
 def train(args, train_dataset, model, tokenizer):
@@ -427,6 +430,8 @@ def train(args, train_dataset, model, tokenizer):
 
 
 def evaluate(args, model, tokenizer, prefix=""):
+    if args.n_gpu > 1:
+        model = torch.nn.DataParallel(model)
     dataset, examples, features = load_and_cache_examples(args, tokenizer, evaluate=True, output_examples=True)
 
     if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
@@ -470,7 +475,8 @@ def evaluate(args, model, tokenizer, prefix=""):
             else:
                 result = RawResult(unique_id=unique_id,
                                    start_logits=to_list(outputs[0][i]),
-                                   end_logits=to_list(outputs[1][i]))
+                                   end_logits=to_list(outputs[1][i]),
+                                   yesno_logits=to_list(outputs[2][i]))
             all_results.append(result)
 
     # Compute predictions
@@ -493,14 +499,6 @@ def evaluate(args, model, tokenizer, prefix=""):
                           args.max_answer_length, args.do_lower_case, output_prediction_file,
                           output_nbest_file, output_null_log_odds_file, args.verbose_logging,
                           args.version_2_with_negative, args.null_score_diff_threshold)
-
-    # Evaluate with the official SQuAD script
-    evaluate_options = EVAL_OPTS(data_file=args.predict_file,
-                                 pred_file=output_prediction_file,
-                                 na_prob_file=output_null_log_odds_file)
-    results = evaluate_on_squad(evaluate_options)
-    return results
-
 
 
 if __name__ == '__main__':
