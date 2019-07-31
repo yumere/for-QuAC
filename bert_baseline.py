@@ -24,10 +24,10 @@ from torch.utils.data import SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
-from utils import RawResult
-from utils import RawResultExtended
-from utils import load_and_cache_examples
-from utils import write_predictions
+from bert_baseline_util import RawResult
+from bert_baseline_util import RawResultExtended
+from bert_baseline_util import load_and_cache_examples
+from bert_baseline_util import write_predictions
 
 logger = logging.getLogger(__name__)
 
