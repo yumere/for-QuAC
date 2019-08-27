@@ -5,7 +5,6 @@ import logging
 import math
 import os
 
-import numpy as np
 import torch
 from pytorch_transformers import AdamW, WarmupLinearSchedule
 from pytorch_transformers import BertTokenizer
@@ -25,27 +24,6 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 
 
-def evaluate(outputs, targets):
-    total_result = 0
-    total = 0
-    results = []
-    for output, target in zip(outputs, targets):
-        try:
-            index = target.index(-1)
-        except ValueError:
-            index = len(output)
-
-        if output[:index] == target[:index]:
-            results.append(1)
-        else:
-            results.append(0)
-
-        total_result += (np.array(output[:index]) == np.array(target[:index])).sum()
-        total += len(output[:index])
-
-    return sum(results) / len(results), total_result / total
-
-
 class GeLU(nn.Module):
     def __init__(self):
         super(GeLU, self).__init__()
@@ -61,12 +39,11 @@ class OrderNet(BertPreTrainedModel):
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        mlp_hidden_size = 2048
+        mlp_hidden_size = 1024
         self.mlp_hidden_size = mlp_hidden_size
-        self.read = nn.Sequential(nn.BatchNorm1d(config.hidden_size),
-                                  nn.Linear(config.hidden_size, mlp_hidden_size), GeLU(), nn.BatchNorm1d(mlp_hidden_size),
-                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU(), nn.BatchNorm1d(mlp_hidden_size),
-                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU(), nn.BatchNorm1d(mlp_hidden_size))
+        self.read = nn.Sequential(nn.Linear(config.hidden_size, mlp_hidden_size), GeLU(),
+                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU(),
+                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU())
         rnn_hidden_size = mlp_hidden_size
         self.proc_step = 5
         self.encoder = nn.LSTMCell(mlp_hidden_size, rnn_hidden_size)
@@ -75,8 +52,6 @@ class OrderNet(BertPreTrainedModel):
 
         self.decoder = nn.LSTMCell(mlp_hidden_size, rnn_hidden_size)
         self.decoder_attn = nn.MultiheadAttention(embed_dim=rnn_hidden_size, num_heads=1, dropout=config.attention_probs_dropout_prob)
-
-        self.dropout = nn.Dropout(p=config.hidden_dropout_prob)
 
         self.apply(self.init_weights)
 
@@ -93,7 +68,7 @@ class OrderNet(BertPreTrainedModel):
 
         sequence_outputs, pooled_outputs = self.bert(input_ids, attention_mask=input_mask, token_type_ids=segment_ids)
 
-        memory = self.read(self.dropout(pooled_outputs))
+        memory = self.read(pooled_outputs)
         memory = pad_sequence(memory.split(q_len.tolist()))  # max_q_len, batch_size, hidden_size
         _, _, input_size = memory.shape
         init_x = torch.zeros(batch_size, input_size).to(device)
@@ -128,8 +103,8 @@ if __name__ == '__main__':
     parser.add_argument("--warmup_steps", default=0, type=int)
     # TODO: Need to apply gradient accumulation
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--train_batch_size", default=8, type=int)
-    parser.add_argument("--dev_batch_size", default=8, type=int)
+    parser.add_argument("--per_gpu_train_batch_size", default=8, type=int)
+    parser.add_argument("--per_gpu_dev_batch_size", default=8, type=int)
 
     # dataset configuration
     parser.add_argument("--max_question_len", type=int, default=15, metavar="15")
@@ -145,7 +120,6 @@ if __name__ == '__main__':
     parser.add_argument("--logging_steps", default=10, type=int)
     parser.add_argument("--saving_steps", default=100, type=int)
     parser.add_argument("--no_cuda", default=False, action="store_true")
-    parser.add_argument('--in_answer', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -159,8 +133,8 @@ if __name__ == '__main__':
 
     logger.warning("Device: {}, n_gpu: {}".format(device, args.n_gpu))
 
-    args.train_batch_size = args.train_batch_size * max(1, args.n_gpu)
-    args.dev_batch_size = args.dev_batch_size * max(1, args.n_gpu)
+    args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    args.dev_batch_size = args.per_gpu_dev_batch_size * max(1, args.n_gpu)
 
     if args.do_train:
         model = OrderNet.from_pretrained(args.model_name_or_path)
@@ -173,10 +147,10 @@ if __name__ == '__main__':
         tokenizer = BertTokenizer.from_pretrained(args.model_name_or_path)
         dataset = CoQAOrderDataset(args.train_file, "coqa-train.pkl", args.do_lower_case,
                                    max_question_len=args.max_question_len, max_sequence_len=args.max_sequence_len,
-                                   samples_no=args.samples_no, in_answer=args.in_answer)
+                                   samples_no=args.samples_no)
 
         # TODO: Change shuffle state from False to True
-        loader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, drop_last=True, num_workers=1, collate_fn=CoQAOrderDataset.collate_fn)
+        loader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=False, drop_last=True, num_workers=1, collate_fn=CoQAOrderDataset.collate_fn)
         args.t_total = len(loader) * args.num_train_epochs
         logger.info("Total step: {:,}".format(args.t_total))
         max_grad_norm = 1.0
@@ -234,44 +208,4 @@ if __name__ == '__main__':
 
     # TODO: evaluate
     if args.do_eval:
-        model = OrderNet.from_pretrained(args.output_dir)
-        model.to(device)
-
-        tokenizer = BertTokenizer.from_pretrained(args.model_name_or_path)
-        dataset = CoQAOrderDataset(args.train_file, "coqa-dev.pkl", args.do_lower_case,
-                                   max_question_len=args.max_question_len, max_sequence_len=args.max_sequence_len,
-                                   samples_no=1)
-
-        # TODO: Change shuffle state from False to True
-        loader = DataLoader(dataset, batch_size=args.dev_batch_size, shuffle=False, drop_last=True, num_workers=1,
-                            collate_fn=CoQAOrderDataset.collate_fn)
-
-        targets_eval = []
-        outputs_eval = []
-        for i, batch in enumerate(tqdm(loader)):
-            model.eval()
-
-            with torch.no_grad():
-                batch_size, max_q_len, max_seq_len = batch[0].shape
-
-                inputs = {
-                    "input_ids": batch[0].to(device),
-                    "input_mask": batch[1].to(device),
-                    "segment_ids": batch[2].to(device),
-                    "question_mask": batch[4].to(device)
-                }
-                targets = batch[3].to(device)
-                outputs = model(**inputs)
-                outputs = outputs.argmax(dim=2)
-
-                for j, (target, output) in enumerate(zip(targets.tolist(), outputs.tolist())):
-                    if args.dev_batch_size * i + j < 10:
-                        print(output)
-                        print(target)
-                        print("=" * 20)
-
-                    outputs_eval.append(output)
-                    targets_eval.append(target)
-
-        entire_acc, acc = evaluate(outputs_eval, targets_eval)
-        print("{:.4f} {:.4f}".format(entire_acc, acc))
+        pass
