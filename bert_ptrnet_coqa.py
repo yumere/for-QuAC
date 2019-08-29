@@ -208,4 +208,32 @@ if __name__ == '__main__':
 
     # TODO: evaluate
     if args.do_eval:
-        pass
+        model = OrderNet.from_pretrained(args.output_dir)
+        model.to(device)
+
+        tokenizer = BertTokenizer.from_pretrained(args.model_name_or_path)
+        dataset = CoQAOrderDataset(args.train_file, "coqa-dev.pkl", args.do_lower_case,
+                                   max_question_len=args.max_question_len, max_sequence_len=args.max_sequence_len,
+                                   samples_no=1)
+
+        # TODO: Change shuffle state from False to True
+        loader = DataLoader(dataset, batch_size=args.dev_batch_size, shuffle=False, drop_last=True, num_workers=1,
+                            collate_fn=CoQAOrderDataset.collate_fn)
+
+        for i, batch in enumerate(tqdm(loader)):
+            model.eval()
+
+            with torch.no_grad():
+                batch_size, max_q_len, max_seq_len = batch[0].shape
+
+                inputs = {
+                    "input_ids": batch[0].to(device),
+                    "input_mask": batch[1].to(device),
+                    "segment_ids": batch[2].to(device),
+                    "question_mask": batch[4].to(device)
+                }
+                targets = batch[3].to(device)
+                outputs = model(**inputs)
+                print(outputs)
+
+
