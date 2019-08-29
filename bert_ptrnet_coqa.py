@@ -39,11 +39,12 @@ class OrderNet(BertPreTrainedModel):
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        mlp_hidden_size = 1024
+        mlp_hidden_size = 2048
         self.mlp_hidden_size = mlp_hidden_size
-        self.read = nn.Sequential(nn.Linear(config.hidden_size, mlp_hidden_size), GeLU(),
-                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU(),
-                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU())
+        self.read = nn.Sequential(nn.BatchNorm1d(config.hidden_size),
+                                  nn.Linear(config.hidden_size, mlp_hidden_size), GeLU(), nn.BatchNorm1d(mlp_hidden_size),
+                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU(), nn.BatchNorm1d(mlp_hidden_size),
+                                  nn.Linear(mlp_hidden_size, mlp_hidden_size), GeLU(), nn.BatchNorm1d(mlp_hidden_size))
         rnn_hidden_size = mlp_hidden_size
         self.proc_step = 5
         self.encoder = nn.LSTMCell(mlp_hidden_size, rnn_hidden_size)
@@ -103,8 +104,8 @@ if __name__ == '__main__':
     parser.add_argument("--warmup_steps", default=0, type=int)
     # TODO: Need to apply gradient accumulation
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--per_gpu_train_batch_size", default=8, type=int)
-    parser.add_argument("--per_gpu_dev_batch_size", default=8, type=int)
+    parser.add_argument("--train_batch_size", default=8, type=int)
+    parser.add_argument("--dev_batch_size", default=8, type=int)
 
     # dataset configuration
     parser.add_argument("--max_question_len", type=int, default=15, metavar="15")
@@ -120,6 +121,7 @@ if __name__ == '__main__':
     parser.add_argument("--logging_steps", default=10, type=int)
     parser.add_argument("--saving_steps", default=100, type=int)
     parser.add_argument("--no_cuda", default=False, action="store_true")
+    parser.add_argument('--in_answer', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -133,8 +135,8 @@ if __name__ == '__main__':
 
     logger.warning("Device: {}, n_gpu: {}".format(device, args.n_gpu))
 
-    args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    args.dev_batch_size = args.per_gpu_dev_batch_size * max(1, args.n_gpu)
+    args.train_batch_size = args.train_batch_size * max(1, args.n_gpu)
+    args.dev_batch_size = args.dev_batch_size * max(1, args.n_gpu)
 
     if args.do_train:
         model = OrderNet.from_pretrained(args.model_name_or_path)
@@ -147,10 +149,10 @@ if __name__ == '__main__':
         tokenizer = BertTokenizer.from_pretrained(args.model_name_or_path)
         dataset = CoQAOrderDataset(args.train_file, "coqa-train.pkl", args.do_lower_case,
                                    max_question_len=args.max_question_len, max_sequence_len=args.max_sequence_len,
-                                   samples_no=args.samples_no)
+                                   samples_no=args.samples_no, in_answer=args.in_answer)
 
         # TODO: Change shuffle state from False to True
-        loader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=False, drop_last=True, num_workers=1, collate_fn=CoQAOrderDataset.collate_fn)
+        loader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, drop_last=True, num_workers=1, collate_fn=CoQAOrderDataset.collate_fn)
         args.t_total = len(loader) * args.num_train_epochs
         logger.info("Total step: {:,}".format(args.t_total))
         max_grad_norm = 1.0
