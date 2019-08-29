@@ -191,13 +191,14 @@ class CoQAOrderDataset(Dataset):
             q_turn_ids.append(d.q_turn_id)
             question_mask.append(d.question_mask)
 
+        max_sequence_len = len(input_ids[0][0])
         max_q_len = max(len(i) for i in input_ids)
         for i in range(len(input_ids)):
             cur_len = len(input_ids[i])
 
-            input_ids[i] += [[0]*24] * (max_q_len - cur_len)
-            input_mask[i] += [[0]*24] * (max_q_len - cur_len)
-            segment_ids[i] += [[0]*24] * (max_q_len - cur_len)
+            input_ids[i] += [[0]*max_sequence_len] * (max_q_len - cur_len)
+            input_mask[i] += [[0]*max_sequence_len] * (max_q_len - cur_len)
+            segment_ids[i] += [[0]*max_sequence_len] * (max_q_len - cur_len)
             targets[i] += [-1] * (max_q_len - cur_len)
             question_mask[i] += [0] * (max_q_len - cur_len)
 
