@@ -36,7 +36,7 @@ class QuestionSequence:
 
 def prepare_dataset(file_path, tokenizer: BertTokenizer, max_question_len, max_sequence_len, samples_no=5,
                  cls_token="[CLS]", sep_token="[SEP]", pad_token=0, sequence_a_segment_id=0, cls_token_segment_id=0,
-                 pad_token_segment_id=0, mask_padding_with_zero=True, save_path=None):
+                 pad_token_segment_id=0, mask_padding_with_zero=True, save_path=None, in_answer=True):
     # Must exist dataset
     assert os.path.exists(file_path), "{} not exists".format(file_path)
     dataset = json.load(open(file_path))['data']
@@ -50,20 +50,24 @@ def prepare_dataset(file_path, tokenizer: BertTokenizer, max_question_len, max_s
     # TODO: need the multi-processing by using joblib
     for d_id, d in enumerate(tqdm(dataset, desc="Dataset", ncols=85)):
         questions = [q['input_text'] for q in d['questions']]
+        answers = [(a['span_text'], a['input_text']) for a in d['answers']]
         # TODO: Make all possible sequences
         questions = questions[:max_question_len]
+        answers = answers[:max_question_len]
         questions_no = list(range(len(questions)))
         questions_len = len(questions)
 
         q_doc_tokens = []
         q_char_to_word_offset = []
 
-        for question in questions:
+        for question, answer in zip(questions, answers):
             doc_tokens = []
             char_to_word_offset = []
             prev_is_whitespace = True
 
-            for c in question:
+            # TODO: check use span_text or input_text
+            context = " ".join([question, answer[0]]) if in_answer else question
+            for c in context:  # 0 means that I use span_text for the answer text
                 if is_whitespace(c):
                     prev_is_whitespace = True
                 else:
@@ -141,14 +145,6 @@ def prepare_dataset(file_path, tokenizer: BertTokenizer, max_question_len, max_s
             batch_p_mask_ = [batch_p_mask[i-1] for i in questions_no]
             question_mask = [1] * questions_len
 
-            # for _ in range(max_question_len - len(questions)):
-            #     padding = [0] * max_sequence_len
-            #     batch_input_ids_.append(padding)
-            #     batch_input_mask_.append(padding)
-            #     batch_segment_ids_.append(padding)
-            #     batch_p_mask_.append(padding)
-            #     target += [-1]  # ignored index for cross entropy loss
-
             results.append(QuestionSequence(q_turn_id=questions_no, q_text_list=questions_, tokens=batch_tokens_,
                                             input_ids=batch_input_ids_, input_mask=batch_input_mask_,
                                             segment_ids=batch_segment_ids_, p_mask=batch_p_mask_,
@@ -218,7 +214,7 @@ if __name__ == '__main__':
     # print("results: {:,}".format(len(results)))
 
     from torch.utils.data import DataLoader
-    dataset = CoQAOrderDataset(json_file="./CoQA-dataset/dev.json", pkl_file="./coqa-dev.pkl",
+    dataset = CoQAOrderDataset(json_file="./coqa-dataset/dev.json", pkl_file="./coqa-dev.pkl",
                                max_question_len=20, max_sequence_len=24, samples_no=5)
     loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0, collate_fn=CoQAOrderDataset.collate_fn)
     for i, d in enumerate(tqdm(loader)):
