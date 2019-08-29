@@ -4,9 +4,8 @@ import json
 import logging
 import os
 import pickle
-from random import shuffle
-from typing import List
 import random
+from typing import List
 
 import numpy as np
 import torch
