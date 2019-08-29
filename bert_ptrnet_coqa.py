@@ -5,6 +5,7 @@ import logging
 import math
 import os
 
+import numpy as np
 import torch
 from pytorch_transformers import AdamW, WarmupLinearSchedule
 from pytorch_transformers import BertTokenizer
@@ -22,6 +23,27 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
+
+
+def evaluate(outputs, targets):
+    total_result = 0
+    total = 0
+    results = []
+    for output, target in zip(outputs, targets):
+        try:
+            index = target.index(-1)
+        except ValueError:
+            index = len(output)
+
+        if output[:index] == target[:index]:
+            results.append(1)
+        else:
+            results.append(0)
+
+        total_result += (np.array(output[:index]) == np.array(target[:index])).sum()
+        total += len(output[:index])
+
+    return sum(results) / len(results), total_result / total
 
 
 class GeLU(nn.Module):
@@ -54,6 +76,8 @@ class OrderNet(BertPreTrainedModel):
         self.decoder = nn.LSTMCell(mlp_hidden_size, rnn_hidden_size)
         self.decoder_attn = nn.MultiheadAttention(embed_dim=rnn_hidden_size, num_heads=1, dropout=config.attention_probs_dropout_prob)
 
+        self.dropout = nn.Dropout(p=config.hidden_dropout_prob)
+
         self.apply(self.init_weights)
 
     def forward(self, input_ids: torch.Tensor, input_mask: torch.Tensor,
@@ -69,7 +93,7 @@ class OrderNet(BertPreTrainedModel):
 
         sequence_outputs, pooled_outputs = self.bert(input_ids, attention_mask=input_mask, token_type_ids=segment_ids)
 
-        memory = self.read(pooled_outputs)
+        memory = self.read(self.dropout(pooled_outputs))
         memory = pad_sequence(memory.split(q_len.tolist()))  # max_q_len, batch_size, hidden_size
         _, _, input_size = memory.shape
         init_x = torch.zeros(batch_size, input_size).to(device)
@@ -222,6 +246,8 @@ if __name__ == '__main__':
         loader = DataLoader(dataset, batch_size=args.dev_batch_size, shuffle=False, drop_last=True, num_workers=1,
                             collate_fn=CoQAOrderDataset.collate_fn)
 
+        targets_eval = []
+        outputs_eval = []
         for i, batch in enumerate(tqdm(loader)):
             model.eval()
 
@@ -236,6 +262,16 @@ if __name__ == '__main__':
                 }
                 targets = batch[3].to(device)
                 outputs = model(**inputs)
-                print(outputs)
+                outputs = outputs.argmax(dim=2)
 
+                for j, (target, output) in enumerate(zip(targets.tolist(), outputs.tolist())):
+                    if args.dev_batch_size * i + j < 10:
+                        print(output)
+                        print(target)
+                        print("=" * 20)
 
+                    outputs_eval.append(output)
+                    targets_eval.append(target)
+
+        entire_acc, acc = evaluate(outputs_eval, targets_eval)
+        print("{:.4f} {:.4f}".format(entire_acc, acc))
