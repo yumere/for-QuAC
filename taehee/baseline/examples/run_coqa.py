@@ -32,8 +32,8 @@ from tqdm import tqdm, trange
 
 from tensorboardX import SummaryWriter
 
-from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
-                                  BertForQuestionAnswering, BertTokenizer,
+from pytorch_transformers import (WEIGHTS_NAME, BertConfig, BertTokenizer,
+                                  BertForQuestionAnswering,
                                   XLMConfig, XLMForQuestionAnswering,
                                   XLMTokenizer, XLNetConfig,
                                   XLNetForQuestionAnswering,
@@ -41,14 +41,11 @@ from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
 
 from pytorch_transformers import AdamW, WarmupLinearSchedule
 
-from utils_squad import (read_squad_examples, convert_examples_to_features,
-                         RawResult, write_predictions,
-                         RawResultExtended, write_predictions_extended)
+from utils_coqa import (read_coqa_examples, convert_examples_to_features,
+                        RawResult, write_predictions)
 
-# The follwing import is the official SQuAD evaluation script (2.0).
-# You can remove it from the dependencies if you are using this script outside of the library
-# We've added it here for automated tests (see examples/test_examples.py file)
-from utils_squad_evaluate import EVAL_OPTS, main as evaluate_on_squad
+from utils import dev_evaluate, write_coqa, coqa_performance
+from CoQA_eval import CoQAEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +137,8 @@ def train(args, train_dataset, model, tokenizer):
                       'attention_mask': batch[1],
                       'token_type_ids': None if args.model_type == 'xlm' else batch[2],
                       'start_positions': batch[3],
-                      'end_positions': batch[4]}
+                      'end_positions': batch[4],
+                      'ans_choice': batch[5]}
             if args.model_type in ['xlnet', 'xlm']:
                 inputs.update({'cls_index': batch[5],
                                'p_mask': batch[6]})
@@ -169,7 +167,8 @@ def train(args, train_dataset, model, tokenizer):
 
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     # Log metrics
-                    if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
+                    if args.local_rank == -1 and args.evaluate_during_training:
+                        # Only evaluate when single GPU otherwise metrics may not average well
                         results = evaluate(args, model, tokenizer)
                         for key, value in results.items():
                             tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
@@ -183,7 +182,8 @@ def train(args, train_dataset, model, tokenizer):
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
                     model_to_save = model.module if hasattr(model,
-                                                            'module') else model  # Take care of distributed/parallel training
+                                                            'module') else model
+                    # Take care of distributed/parallel training
                     model_to_save.save_pretrained(output_dir)
                     torch.save(args, os.path.join(output_dir, 'training_args.bin'))
                     logger.info("Saving model checkpoint to %s", output_dir)
@@ -245,16 +245,15 @@ def evaluate(args, model, tokenizer, prefix=""):
             else:
                 result = RawResult(unique_id=unique_id,
                                    start_logits=to_list(outputs[0][i]),
-                                   end_logits=to_list(outputs[1][i]))
+                                   end_logits=to_list(outputs[1][i]),
+                                   class_logits=to_list(outputs[2][i]))
             all_results.append(result)
 
     # Compute predictions
     output_prediction_file = os.path.join(args.output_dir, "predictions_{}.json".format(prefix))
     output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_{}.json".format(prefix))
-    if args.version_2_with_negative:
-        output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_{}.json".format(prefix))
-    else:
-        output_null_log_odds_file = None
+
+    output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_{}.json".format(prefix))
 
     if args.model_type in ['xlnet', 'xlm']:
         # XLNet uses a more complex post-processing procedure
@@ -262,23 +261,25 @@ def evaluate(args, model, tokenizer, prefix=""):
                                    args.max_answer_length, output_prediction_file,
                                    output_nbest_file, output_null_log_odds_file, args.predict_file,
                                    model.config.start_n_top, model.config.end_n_top,
-                                   args.version_2_with_negative, tokenizer, args.verbose_logging)
+                                   tokenizer, args.verbose_logging)
     else:
-        write_predictions(examples, features, all_results, args.n_best_size,
-                          args.max_answer_length, args.do_lower_case, output_prediction_file,
-                          output_nbest_file, output_null_log_odds_file, args.verbose_logging,
-                          args.version_2_with_negative, args.null_score_diff_threshold)
-    # Evaluate with the official SQuAD script
-    evaluate_options = EVAL_OPTS(data_file=args.predict_file,
-                                 pred_file=output_prediction_file,
-                                 na_prob_file=output_null_log_odds_file)
-    results = evaluate_on_squad(evaluate_options)
-    return results
+        pred, nbest_pred = write_predictions(examples, features, all_results, args.n_best_size,
+                                             args.max_answer_length, args.do_lower_case, output_prediction_file,
+                                             output_nbest_file, output_null_log_odds_file, args.verbose_logging,
+                                             args.null_score_diff_threshold)
+    evaluator = CoQAEvaluator(args.predict_file)
+    performance = coqa_performance(pred, nbest_pred, evaluator)
+    in_domain_f1 = performance['in_domain']['f1']
+    out_domain_f1 = performance['out_domain']['f1']
+    overall_f1 = performance['overall']['f1']
+
+    return in_domain_f1, out_domain_f1, overall_f1
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False):
-    if args.local_rank not in [-1, 0]:
-        torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    if args.local_rank not in [-1, 0] and not evaluate:
+        torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset,
+        # and the others will use the cache
 
     # Load data features from cache or dataset file
     input_file = args.predict_file if evaluate else args.train_file
@@ -291,9 +292,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
         features = torch.load(cached_features_file)
     else:
         logger.info("Creating features from dataset file at %s", input_file)
-        examples = read_squad_examples(input_file=input_file,
-                                       is_training=not evaluate,
-                                       version_2_with_negative=args.version_2_with_negative)
+        examples = read_coqa_examples(input_file=input_file,
+                                      is_training=not evaluate)
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
                                                 max_seq_length=args.max_seq_length,
@@ -304,25 +304,25 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)
 
-    if args.local_rank == 0:
-        torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    if args.local_rank == 0 and not evaluate:
+        torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset,
+        # and the others will use the cache
 
     # Convert to Tensors and build dataset
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-    all_cls_index = torch.tensor([f.cls_index for f in features], dtype=torch.long)
-    all_p_mask = torch.tensor([f.p_mask for f in features], dtype=torch.float)
+    all_ans_choice = torch.tensor([f.ans_choice for f in features], dtype=torch.long)
+
     if evaluate:
         all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
         dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                                all_example_index, all_cls_index, all_p_mask)
+                                all_example_index)
     else:
         all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
         all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
         dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                                all_start_positions, all_end_positions,
-                                all_cls_index, all_p_mask)
+                                all_start_positions, all_end_positions, all_ans_choice)
 
     if output_examples:
         return dataset, examples, features
@@ -332,11 +332,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
 def main():
     parser = argparse.ArgumentParser()
 
-    ## Required parameters
-    parser.add_argument("--train_file", default=None, type=str, required=True,
-                        help="SQuAD json for training. E.g., train-v1.1.json")
-    parser.add_argument("--predict_file", default=None, type=str, required=True,
-                        help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
+    # Required parameters
     parser.add_argument("--model_type", default=None, type=str, required=True,
                         help="Model type selected in the list: " + ", ".join(MODEL_CLASSES.keys()))
     parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
@@ -344,20 +340,13 @@ def main():
                             ALL_MODELS))
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model checkpoints and predictions will be written.")
+    parser.add_argument("--train_file", default=None, type=str, required=True,
+                        help="CoQA json for training. E.g., train-v1.1.json")
+    parser.add_argument("--predict_file", default=None, type=str, required=True,
+                        help="CoQA json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
 
-    ## Other parameters
-    parser.add_argument("--config_name", default="", type=str,
-                        help="Pretrained config name or path if not the same as model_name")
-    parser.add_argument("--tokenizer_name", default="", type=str,
-                        help="Pretrained tokenizer name or path if not the same as model_name")
-    parser.add_argument("--cache_dir", default="", type=str,
-                        help="Where do you want to store the pre-trained models downloaded from s3")
-
-    parser.add_argument('--version_2_with_negative', action='store_true',
-                        help='If true, the SQuAD examples contain some that do not have an answer.')
-    parser.add_argument('--null_score_diff_threshold', type=float, default=0.0,
-                        help="If null_score - best_non_null is greater than the threshold predict null.")
-
+    # Other parameters
+    parser.add_argument("--output_file", default=None, type=str, help="-i")
     parser.add_argument("--max_seq_length", default=384, type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
                              "longer than this will be truncated, and sequences shorter than this will be padded.")
@@ -370,59 +359,67 @@ def main():
                         help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true',
                         help="Whether to run eval on the dev set.")
-    parser.add_argument("--evaluate_during_training", action='store_true',
-                        help="Rul evaluation during training at each logging step.")
-    parser.add_argument("--do_lower_case", action='store_true',
-                        help="Set this flag if you are using an uncased model.")
-
     parser.add_argument("--per_gpu_train_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
     parser.add_argument("--per_gpu_eval_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument("--learning_rate", default=5e-5, type=float,
                         help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs", default=3.0, type=float,
+                        help="Total number of training epochs to perform.")
+    parser.add_argument("--warmup_steps", default=0, type=int,
+                        help="Linear warmup over warmup_steps.")
+    parser.add_argument("--n_best_size", default=20, type=int,
+                        help="The total number of n-best predictions to generate "
+                             "in the nbest_predictions.json output file.")
+    parser.add_argument("--max_answer_length", default=30, type=int,
+                        help="The maximum length of an answer that can be generated. This is needed because the start "
+                             "and end predictions are not conditioned on one another.")
+    parser.add_argument("--verbose_logging", default=False, action='store_true',
+                        help="If true, all of the warnings related to data processing will be printed. "
+                             "A number of warnings are expected for a normal SQuAD evaluation.")
+    parser.add_argument("--no_cuda", action='store_true',
+                        help="Whether not to use CUDA when available")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="random seed for initialization")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument("--do_lower_case", action='store_true',
+                        help="Set this flag if you are using an uncased model.")
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="local_rank for distributed training on gpus")
+    parser.add_argument('--fp16', action='store_true',
+                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
+    parser.add_argument('--null_score_diff_threshold', type=float, default=0.0,
+                        help="If null_score - best_non_null is greater than the threshold predict null.")
+
+    parser.add_argument("--config_name", default="", type=str,
+                        help="Pretrained config name or path if not the same as model_name")
+    parser.add_argument("--tokenizer_name", default="", type=str,
+                        help="Pretrained tokenizer name or path if not the same as model_name")
+    parser.add_argument("--cache_dir", default="", type=str,
+                        help="Where do you want to store the pre-trained models downloaded from s3")
+    parser.add_argument("--evaluate_during_training", action='store_true',
+                        help="Rul evaluation during training at each logging step.")
     parser.add_argument("--weight_decay", default=0.0, type=float,
                         help="Weight deay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                         help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float,
                         help="Max gradient norm.")
-    parser.add_argument("--num_train_epochs", default=3.0, type=float,
-                        help="Total number of training epochs to perform.")
     parser.add_argument("--max_steps", default=-1, type=int,
                         help="If > 0: set total number of training steps to perform. Override num_train_epochs.")
-    parser.add_argument("--warmup_steps", default=0, type=int,
-                        help="Linear warmup over warmup_steps.")
-    parser.add_argument("--n_best_size", default=20, type=int,
-                        help="The total number of n-best predictions to generate in the nbest_predictions.json output file.")
-    parser.add_argument("--max_answer_length", default=30, type=int,
-                        help="The maximum length of an answer that can be generated. This is needed because the start "
-                             "and end predictions are not conditioned on one another.")
-    parser.add_argument("--verbose_logging", action='store_true',
-                        help="If true, all of the warnings related to data processing will be printed. "
-                             "A number of warnings are expected for a normal SQuAD evaluation.")
-
     parser.add_argument('--logging_steps', type=int, default=50,
                         help="Log every X updates steps.")
-    parser.add_argument('--save_steps', type=int, default=50,
+    parser.add_argument('--save_steps', type=int, default=500,
                         help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_all_checkpoints", action='store_true',
-                        help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number")
-    parser.add_argument("--no_cuda", action='store_true',
-                        help="Whether not to use CUDA when available")
+                        help="Evaluate all checkpoints starting with the same prefix "
+                             "as model_name ending and ending with step number")
     parser.add_argument('--overwrite_output_dir', action='store_true',
                         help="Overwrite the content of the output directory")
     parser.add_argument('--overwrite_cache', action='store_true',
                         help="Overwrite the cached training and evaluation sets")
-    parser.add_argument('--seed', type=int, default=42,
-                        help="random seed for initialization")
-
-    parser.add_argument("--local_rank", type=int, default=-1,
-                        help="local_rank for distributed training on gpus")
-    parser.add_argument('--fp16', action='store_true',
-                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
     parser.add_argument('--fp16_opt_level', type=str, default='O1',
                         help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
                              "See details at https://nvidia.github.io/apex/amp.html")
@@ -467,7 +464,8 @@ def main():
 
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
-        torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
+        torch.distributed.barrier()
+        # Make sure only the first process in distributed training will download model & vocab
 
     args.model_type = args.model_type.lower()
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
@@ -478,7 +476,8 @@ def main():
                                         config=config)
 
     if args.local_rank == 0:
-        torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
+        torch.distributed.barrier()
+        # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)
 
@@ -491,7 +490,7 @@ def main():
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     # Save the trained model and the tokenizer
-    if args.local_rank == -1 or torch.distributed.get_rank() == 0:
+    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         # Create output directory if needed
         if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
             os.makedirs(args.output_dir)
@@ -509,7 +508,7 @@ def main():
 
         # Load a trained model and vocabulary that you have fine-tuned
         model = model_class.from_pretrained(args.output_dir)
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir)
+        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
         model.to(args.device)
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
@@ -521,20 +520,23 @@ def main():
                 os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
             logging.getLogger("pytorch_transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
 
+        logger.info("Evaluate the following checkpoints: %s", checkpoints)
+
         for checkpoint in checkpoints:
-            logger.info("Evaluate the following checkpoints: %s", checkpoints)
             # Reload the model
             global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
             model = model_class.from_pretrained(checkpoint)
             model.to(args.device)
 
             # Evaluate
-            result = evaluate(args, model, tokenizer, prefix=global_step)
+            in_domain_f1, out_domain_f1, overall_f1 = evaluate(args, model, tokenizer, prefix=global_step)
 
-            result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
+            # result = dict((k + ('_{}'.format(global_step) if global_step else ''), v) for k, v in result.items())
+            result = dict(in_domain_f1=in_domain_f1,out_domain_f1=out_domain_f1,overall_f1=overall_f1)
             results.update(result)
 
     logger.info("Results: {}".format(results))
+
     return results
 
 
