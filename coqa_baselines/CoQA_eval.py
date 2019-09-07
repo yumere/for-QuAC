@@ -19,7 +19,6 @@ domain_mappings = {"mctest":"children_stories", "gutenberg":"literature", "race"
 
 
 class CoQAEvaluator():
-
     def __init__(self, gold_file):
         self.gold_data, self.id_to_source = CoQAEvaluator.gold_answers_to_dict(gold_file)
 
