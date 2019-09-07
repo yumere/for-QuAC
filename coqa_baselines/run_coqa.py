@@ -18,13 +18,12 @@
 from __future__ import absolute_import, division, print_function
 
 import argparse
+import collections
 import glob
-import re
 import logging
 import os
-import collections
-from torch import nn
 import random
+import re
 
 import numpy as np
 import torch
@@ -37,6 +36,7 @@ from pytorch_transformers import (WEIGHTS_NAME, BertConfig, BertTokenizer,
                                   XLNetTokenizer)
 from pytorch_transformers.modeling_bert import BertPreTrainedModel, BertModel
 from tensorboardX import SummaryWriter
+from torch import nn
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from torch.utils.data.distributed import DistributedSampler

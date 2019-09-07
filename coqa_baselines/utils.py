@@ -1,10 +1,10 @@
 import collections
 import json
-import math
 import re
 import string
 from collections import Counter, defaultdict
 
+import math
 from pytorch_transformers import BasicTokenizer
 
 

@@ -12,9 +12,9 @@ import json
 import os
 import re
 import string
-import sys
 
 import numpy as np
+import sys
 
 
 class EVAL_OPTS:
