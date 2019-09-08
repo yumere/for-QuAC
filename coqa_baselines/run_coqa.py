@@ -21,9 +21,12 @@ import argparse
 import collections
 import glob
 import logging
+import math
 import os
 import random
 import re
+from copy import deepcopy
+from typing import Dict, Any, Callable, Tuple
 
 import numpy as np
 import torch
@@ -37,6 +40,7 @@ from pytorch_transformers import (WEIGHTS_NAME, BertConfig, BertTokenizer,
 from pytorch_transformers.modeling_bert import BertPreTrainedModel, BertModel
 from tensorboardX import SummaryWriter
 from torch import nn
+from torch.nn import Dropout, Sequential
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from torch.utils.data.distributed import DistributedSampler

@@ -2,9 +2,9 @@ from __future__ import absolute_import, division, print_function
 
 import argparse
 import logging
-import math
 import os
 
+import math
 import numpy as np
 import torch
 from pytorch_transformers import AdamW, WarmupLinearSchedule
@@ -94,7 +94,7 @@ class OrderNet(BertPreTrainedModel):
         sequence_outputs, pooled_outputs = self.bert(input_ids, attention_mask=input_mask, token_type_ids=segment_ids)
 
         memory = self.read(self.dropout(pooled_outputs))
-        memory = pad_sequence(memory.split(q_len.tolist()))  # max_q_len, batch_size, hidden_size
+        memory = pad_sequence(memory.split(q_len.tolist()))  # max_q_len, batch_size, read_hidden_size
         _, _, input_size = memory.shape
         init_x = torch.zeros(batch_size, input_size).to(device)
         h_t, c_t = [torch.zeros(batch_size, self.encoder.hidden_size).to(device) for i in range(2)]
