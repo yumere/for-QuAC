@@ -304,11 +304,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             segment_ids.append(0)
 
             # Query
-            q_pad_start = -1
             for idx, token in enumerate(query_tokens):
                 tokens.append(token)
-                if token == '_' and q_pad_start == -1:
-                    q_pad_start = idx
                 segment_ids.append(0)
 
             # SEP token
@@ -343,11 +340,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 input_ids.append(0)
                 input_mask.append(0)
                 segment_ids.append(0)
-
-            # Question padding be 0
-            for idx in range(q_pad_start, len(query_tokens)):
-                input_ids[idx] = 0
-                input_mask[idx] = 0
 
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
