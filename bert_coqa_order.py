@@ -231,7 +231,7 @@ def train(args, train_dataset, model, tokenizer):
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     coqa_train_loader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
-    sequence_dataset = CoQAOrderDataset(pkl_file="./coqa-dataset/coqa-train-v1.0.pkl")
+    sequence_dataset = CoQAOrderDataset(pkl_file="./coqa-dataset/train.pkl")
     sequence_loader = DataLoader(sequence_dataset, batch_size=args.sequence_per_train_batch_size, shuffle=True, collate_fn=CoQAOrderDataset.collate_fn)
 
     if args.max_steps > 0:
@@ -305,8 +305,8 @@ def train(args, train_dataset, model, tokenizer):
                 sequence_loss = sequence_loss.sum() / batch_size
                 sequence_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                scheduler.step()
                 optimizer.step()
+                scheduler.step()
                 model.zero_grad()
 
             batch = tuple(t.to(args.device) for t in batch)
@@ -337,8 +337,8 @@ def train(args, train_dataset, model, tokenizer):
 
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
-                scheduler.step()  # Update learning rate schedule
                 optimizer.step()
+                scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
                 global_step += 1
 
