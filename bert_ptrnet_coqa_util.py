@@ -207,15 +207,24 @@ class CoQAOrderDataset(Dataset):
 
 if __name__ == '__main__':
     # tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", do_lower_case=True)
-    # file_name = "./CoQA-dataset/dev.json"
+    # output_file_name = "./CoQA-dataset/dev.json"
     # save_path = "./coqa-dev.pkl"
     #
-    # results = prepare_dataset(file_name, tokenizer, max_question_len=15, max_sequence_len=24, samples_no=10, save_path=save_path)
+    # results = prepare_dataset(output_file_name, tokenizer, max_question_len=15, max_sequence_len=24, samples_no=10, save_path=save_path)
     # print("results: {:,}".format(len(results)))
 
     from torch.utils.data import DataLoader
-    dataset = CoQAOrderDataset(json_file="./coqa-dataset/dev.json", pkl_file="./coqa-dev.pkl",
-                               max_question_len=20, max_sequence_len=24, samples_no=5)
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-f', "--file", type=str, required=True)
+    args = parser.parse_args()
+
+    output_file_name = args.file.split(".")
+    output_file_name[-1] = "pkl"
+    output_file_name = ".".join(output_file_name)
+    dataset = CoQAOrderDataset(json_file=args.file, pkl_file=output_file_name,
+                               max_question_len=15, max_sequence_len=32, samples_no=5)
     loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0, collate_fn=CoQAOrderDataset.collate_fn)
     for i, d in enumerate(tqdm(loader)):
         if i == 10:
