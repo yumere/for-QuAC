@@ -40,6 +40,7 @@ from pytorch_transformers import (WEIGHTS_NAME, BertConfig, BertTokenizer,
 from pytorch_transformers.modeling_bert import BertPreTrainedModel, BertModel
 from tensorboardX import SummaryWriter
 from torch import nn
+from torch.nn.utils import clip_grad_norm_
 from torch.nn import Dropout, Sequential
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
@@ -50,6 +51,7 @@ from coqa_baselines.CoQA_eval import CoQAEvaluator
 from coqa_baselines.utils import coqa_performance
 from coqa_baselines.utils_coqa import (read_coqa_examples, convert_examples_to_features,
                                        RawResult, write_predictions, write_predictions_extended)
+from bert_ptrnet_coqa_util import QuestionSequence, CoQAOrderDataset
 
 logger = logging.getLogger(__name__)
 
@@ -110,14 +112,14 @@ class OrderNet(nn.Module):
         h_t, c_t = [torch.zeros(batch_size, self.rnn_hidden_size).to(device) for i in range(2)]
         for i in range(proc_step):
             h_t, c_t = self.encoder(init_x, (h_t, c_t))
-            attn_output, attn_output_weights = self.encoder_attn(h_t.unsqueeze(0), memory, memory, mask)
+            attn_output, attn_output_weights = self.encoder_attn(h_t.unsqueeze(0), memory, memory, mask == 0)
             attn_output = attn_output.squeeze(0)
             h_t = self.proj(torch.cat([h_t, attn_output], dim=1))
 
         outputs = []
         for i in range(q_len):
             h_t, c_t = self.decoder(init_x, (h_t, c_t))
-            attn_output, attn_output_weights = self.decoder_attn(h_t.unsqueeze(0), memory, memory, mask)
+            attn_output, attn_output_weights = self.decoder_attn(h_t.unsqueeze(0), memory, memory, mask == 0)
             outputs.append(attn_output_weights.squeeze(1))
         probs = torch.stack(outputs, dim=1)
         return probs
@@ -133,7 +135,7 @@ class OrderNet(nn.Module):
         return nn.Sequential(in_layer, inner_layer, out_layer)
 
     def __call__(self, inputs, mask=None, proc_step=5):
-        self.forward(inputs, mask, proc_step)
+        return self.forward(inputs, mask, proc_step)
 
 
 class CoQABaseline(BertPreTrainedModel):
@@ -152,40 +154,52 @@ class CoQABaseline(BertPreTrainedModel):
         self.apply(self.init_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, start_positions=None,
-                end_positions=None, position_ids=None, head_mask=None, ans_choice=None):
-        sequence_outputs, pooled_outputs = self.bert(input_ids, position_ids=position_ids,
-                                                     token_type_ids=token_type_ids,
-                                                     attention_mask=attention_mask, head_mask=head_mask)
+                end_positions=None, position_ids=None, head_mask=None, ans_choice=None, question_mask=None, order_train=False):
+        if order_train:
+            batch_size, q_len, seq_len = input_ids.shape
+            input_ids = input_ids.reshape(batch_size * q_len, -1)
+            token_type_ids = token_type_ids.reshape(batch_size * q_len, -1)
+            attention_mask = attention_mask.reshape(batch_size * q_len, -1)
+            _, pooled_outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+                                          attention_mask=attention_mask, head_mask=head_mask)
+            pooled_outputs = pooled_outputs.reshape(batch_size, q_len, -1)
+            outputs = self.order_net(inputs=pooled_outputs, mask=question_mask)
+            return outputs
 
-        logits = self.qa_outputs(sequence_outputs)
-        start_logits, end_logits = logits.split(1, dim=-1)
-        start_logits = start_logits.squeeze(-1)
-        end_logits = end_logits.squeeze(-1)
+        else:
+            sequence_outputs, pooled_outputs = self.bert(input_ids, position_ids=position_ids,
+                                                         token_type_ids=token_type_ids,
+                                                         attention_mask=attention_mask, head_mask=head_mask)
 
-        class_logits = self.class_outputs(pooled_outputs)
+            logits = self.qa_outputs(sequence_outputs)
+            start_logits, end_logits = logits.split(1, dim=-1)
+            start_logits = start_logits.squeeze(-1)
+            end_logits = end_logits.squeeze(-1)
 
-        outputs = (start_logits, end_logits, class_logits)
-        if start_positions is not None and end_positions is not None:
-            # If we are on multi-GPU, split add a dimension
-            if len(start_positions.size()) > 1:
-                start_positions = start_positions.squeeze(-1)
-            if len(end_positions.size()) > 1:
-                end_positions = end_positions.squeeze(-1)
-            # sometimes the start/end positions are outside our model inputs, we ignore these terms
-            ignored_index = start_logits.size(1)
-            start_positions.clamp_(0, ignored_index)
-            end_positions.clamp_(0, ignored_index)
+            class_logits = self.class_outputs(pooled_outputs)
 
-            loss_fct = nn.CrossEntropyLoss(ignore_index=ignored_index)
-            start_loss = loss_fct(start_logits, start_positions)
-            end_loss = loss_fct(end_logits, end_positions)
+            outputs = (start_logits, end_logits, class_logits)
+            if start_positions is not None and end_positions is not None:
+                # If we are on multi-GPU, split add a dimension
+                if len(start_positions.size()) > 1:
+                    start_positions = start_positions.squeeze(-1)
+                if len(end_positions.size()) > 1:
+                    end_positions = end_positions.squeeze(-1)
+                # sometimes the start/end positions are outside our model inputs, we ignore these terms
+                ignored_index = start_logits.size(1)
+                start_positions.clamp_(0, ignored_index)
+                end_positions.clamp_(0, ignored_index)
 
-            class_loss_fct = nn.CrossEntropyLoss(ignore_index=3)
-            class_loss = class_loss_fct(class_logits, ans_choice)
-            total_loss = (start_loss + end_loss + class_loss) / 3
-            outputs = (total_loss,) + outputs
+                loss_fct = nn.CrossEntropyLoss(ignore_index=ignored_index)
+                start_loss = loss_fct(start_logits, start_positions)
+                end_loss = loss_fct(end_logits, end_positions)
 
-        return outputs  # (loss), start_logits, end_logits, class_logits (hidden_states), (attentions)
+                class_loss_fct = nn.CrossEntropyLoss(ignore_index=3)
+                class_loss = class_loss_fct(class_logits, ans_choice)
+                total_loss = (start_loss + end_loss + class_loss) / 3
+                outputs = (total_loss,) + outputs
+
+            return outputs  # (loss), start_logits, end_logits, class_logits (hidden_states), (attentions)
 
     def initialize_from_order_weight(self, order_params):
         cur_params = self.state_dict()
@@ -195,7 +209,6 @@ class CoQABaseline(BertPreTrainedModel):
             if isinstance(param, nn.Parameter):
                 param = param.data
             cur_params[name].copy_(param)
-
 
 def set_seed(args):
     random.seed(args.seed)
@@ -216,13 +229,16 @@ def train(args, train_dataset, model, tokenizer):
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    coqa_train_loader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
+    sequence_dataset = CoQAOrderDataset(pkl_file="./coqa-dataset/coqa-train-v1.0.pkl")
+    sequence_loader = DataLoader(sequence_dataset, batch_size=24, shuffle=True, collate_fn=CoQAOrderDataset.collate_fn)
 
     if args.max_steps > 0:
         t_total = args.max_steps
-        args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
+        args.num_train_epochs = args.max_steps // (len(coqa_train_loader) // args.gradient_accumulation_steps) + 1
     else:
-        t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+        t_total = len(coqa_train_loader) // args.gradient_accumulation_steps * args.num_train_epochs
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
@@ -267,9 +283,32 @@ def train(args, train_dataset, model, tokenizer):
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
-        epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+        epoch_iterator = tqdm(coqa_train_loader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
             model.train()
+
+            for i in range(3):
+                sequence_batch = next(sequence_loader.__iter__())
+                sequence_batch = tuple(t.to(args.device) for t in sequence_batch)
+                batch_size, max_q_len, max_seq_len = sequence_batch[0].shape
+                inputs = {
+                    "input_ids": sequence_batch[0],
+                    "attention_mask": sequence_batch[1],
+                    "token_type_ids": sequence_batch[2],
+                    "question_mask": sequence_batch[4]
+                }
+                targets = sequence_batch[3].to(args.device)
+                outputs = model(**inputs, order_train=True)
+
+                criterion = nn.CrossEntropyLoss(ignore_index=-1, reduction='none')
+                sequence_loss = criterion(outputs.reshape(-1, max_q_len), targets.reshape(-1))
+                sequence_loss = sequence_loss.sum() / batch_size
+                sequence_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                scheduler.step()
+                optimizer.step()
+                model.zero_grad()
+
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {'input_ids': batch[0],
                       'attention_mask': batch[1],
@@ -312,6 +351,7 @@ def train(args, train_dataset, model, tokenizer):
                             tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
                     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar('loss', (tr_loss - logging_loss) / args.logging_steps, global_step)
+                    tb_writer.add_scalar("sequence_loss", sequence_loss.item(), global_step)
                     logging_loss = tr_loss
 
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
