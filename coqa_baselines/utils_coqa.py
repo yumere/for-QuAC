@@ -20,12 +20,12 @@ from __future__ import absolute_import, division, print_function
 import collections
 import json
 import logging
+import math
 import re
 import string
 from collections import Counter
 from io import open
 
-import math
 import numpy as np
 from pytorch_transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
 from tqdm import tqdm

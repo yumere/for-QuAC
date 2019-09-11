@@ -232,7 +232,7 @@ def train(args, train_dataset, model, tokenizer):
     coqa_train_loader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     sequence_dataset = CoQAOrderDataset(pkl_file="./coqa-dataset/coqa-train-v1.0.pkl")
-    sequence_loader = DataLoader(sequence_dataset, batch_size=24, shuffle=True, collate_fn=CoQAOrderDataset.collate_fn)
+    sequence_loader = DataLoader(sequence_dataset, batch_size=args.sequence_per_train_batch_size, shuffle=True, collate_fn=CoQAOrderDataset.collate_fn)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -543,6 +543,8 @@ def main():
                         help="Whether to run eval on the dev set.")
     parser.add_argument("--per_gpu_train_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for training.")
+    parser.add_argument("--sequence_per_train_batch_size", default=8, type=int,
+                        help="")
     parser.add_argument("--per_gpu_eval_batch_size", default=8, type=int,
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument("--learning_rate", default=5e-5, type=float,
